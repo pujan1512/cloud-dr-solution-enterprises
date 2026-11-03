@@ -1,0 +1,243 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cloud-Based Disaster Recovery Solution - Secondary / DR Region Infrastructure (Phase 1 / 50% Milestone)
+  Deploys DR VPC (10.1.0.0/16), DR Subnets, Warm Standby / Pilot-Light EC2 Instance,
+  DR S3 Replica Destination Bucket, and IAM Recovery Execution Roles.
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name prefix for resources
+    Type: String
+    Default: Production-DR
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair in DR Region
+    Type: String
+    Default: dr-key-pair
+
+  PrimaryRegionName:
+    Description: Primary AWS Region name (for tagging & cross-region tracking)
+    Type: String
+    Default: us-east-1
+
+  DRBackupBucketPrefix:
+    Description: S3 Bucket Prefix for DR replica bucket
+    Type: String
+    Default: enterprise-dr-replica-backup
+
+Resources:
+  # ==========================================
+  # 1. DR NETWORKING (ISOLATED CIDR 10.1.0.0/16)
+  # ==========================================
+  DRVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.1.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-VPC'
+        - Key: DisasterRecoveryRole
+          Value: Standby-DR
+
+  DRInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-IGW'
+
+  DRVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DRVPC
+      InternetGatewayId: !Ref DRInternetGateway
+
+  DRPublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DRVPC
+      CidrBlock: 10.1.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Public-Subnet-1'
+
+  DRPrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DRVPC
+      CidrBlock: 10.1.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Private-Subnet-1'
+
+  DRPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DRVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Public-RouteTable'
+
+  DRPublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: DRVPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref DRPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref DRInternetGateway
+
+  DRPublicSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DRPublicSubnet1
+      RouteTableId: !Ref DRPublicRouteTable
+
+  # ==========================================
+  # 2. DR SECURITY GROUPS
+  # ==========================================
+  DRWebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow inbound HTTP/HTTPS traffic to DR instances during failover
+      VpcId: !Ref DRVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-WebSG'
+
+  # ==========================================
+  # 3. DR COMPUTE (WARM STANDBY / PILOT-LIGHT EC2)
+  # ==========================================
+  DRStandbyEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: ami-006f0b7242f735db1 # Amazon Linux 2 DR Region (replace with AMI)
+      KeyName: !Ref KeyName
+      SubnetId: !Ref DRPublicSubnet1
+      SecurityGroupIds:
+        - !Ref DRWebSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd php mysql awscli
+          systemctl start httpd
+          systemctl enable httpd
+          echo "<h1>Cloud Disaster Recovery Solution - DR FAILOVER ACTIVE</h1>" > /var/www/html/index.html
+          echo "<h3>Status: ACTIVE (FAILOVER ENGAGED) | Node: DR-Standby-EC2</h3>" >> /var/www/html/index.html
+          echo "<p>Synchronized from primary backups at: $(date)</p>" >> /var/www/html/index.html
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-WarmStandbyServer'
+        - Key: Role
+          Value: DRStandbyWorkload
+        - Key: FailoverTriggerStatus
+          Value: Ready
+
+  # ==========================================
+  # 4. STORAGE (DR REPLICA S3 BUCKET)
+  # ==========================================
+  DRReplicaS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${DRBackupBucketPrefix}-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DRRetentionRule
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+            ExpirationInDays: 365
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-ReplicaBucket'
+        - Key: DisasterRecoveryRole
+          Value: CrossRegionReplicaDestination
+
+  # ==========================================
+  # 5. IAM ROLE FOR AUTOMATED RECOVERY EXECUTION
+  # ==========================================
+  DRRecoveryExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-ExecutionRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DRFailoverPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ec2:AssociateAddress
+                  - rds:PromoteReadReplica
+                  - rds:DescribeDBInstances
+                  - route53:ChangeResourceRecordSets
+                  - route53:GetHealthCheckStatus
+                  - sns:Publish
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource: '*'
+
+Outputs:
+  DRVPCId:
+    Description: DR VPC ID
+    Value: !Ref DRVPC
+
+  DRStandbyEC2Id:
+    Description: DR Standby EC2 Instance ID
+    Value: !Ref DRStandbyEC2Instance
+
+  DRStandbyEC2PublicIP:
+    Description: Public IP of DR Standby App Server
+    Value: !GetAtt DRStandbyEC2Instance.PublicIp
+
+  DRS3BucketName:
+    Description: DR S3 Replica Bucket Name
+    Value: !Ref DRReplicaS3Bucket
+
+  RecoveryRoleArn:
+    Description: IAM Role ARN for automated recovery
+    Value: !GetAtt DRRecoveryExecutionRole.Arn

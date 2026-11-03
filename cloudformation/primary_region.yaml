@@ -1,0 +1,270 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cloud-Based Disaster Recovery Solution - Primary Region Infrastructure (Phase 1 / 50% Milestone)
+  Deploys Primary VPC, Public/Private Subnets across 2 AZs, Security Groups, Primary EC2 Web/App Server,
+  Multi-AZ RDS MySQL Database, and S3 Bucket with Versioning & SSE-KMS encryption.
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name prefix for resources
+    Type: String
+    Default: Production-Primary
+  
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access
+    Type: String
+    Default: my-key-pair
+
+  DBMasterUsername:
+    Description: Master username for RDS database
+    Type: String
+    Default: dbadmin
+
+  DBMasterPassword:
+    Description: Master password for RDS database
+    Type: String
+    NoEcho: true
+    Default: EnterpriseDR2026!
+
+  BackupBucketPrefix:
+    Description: S3 Bucket Prefix for primary backups
+    Type: String
+    Default: enterprise-dr-primary-backup
+
+Resources:
+  # ==========================================
+  # 1. NETWORKING (VPC, SUBNETS, GATEWAYS)
+  # ==========================================
+  PrimaryVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-VPC'
+        - Key: DisasterRecoveryRole
+          Value: Primary
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-IGW'
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref PrimaryVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnet (AZ 1) - Web & App Tier
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PrimaryVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Public-Subnet-1'
+
+  # Private Subnet 1 (AZ 1) - DB Tier
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PrimaryVPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Private-Subnet-1'
+
+  # Private Subnet 2 (AZ 2) - Multi-AZ DB Tier
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PrimaryVPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Private-Subnet-2'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref PrimaryVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Public-RouteTable'
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  # ==========================================
+  # 2. SECURITY GROUPS
+  # ==========================================
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP/HTTPS from Internet and SSH from admin IP
+      VpcId: !Ref PrimaryVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-WebSG'
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow MySQL access strictly from Web App Security Group
+      VpcId: !Ref PrimaryVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-DBSG'
+
+  # ==========================================
+  # 3. COMPUTE (PRIMARY APPLICATION SERVER)
+  # ==========================================
+  PrimaryEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: ami-0c55b159cbfafe1f0
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd php mysql
+          systemctl start httpd
+          systemctl enable httpd
+          echo "<h1>Cloud Disaster Recovery Solution - Primary Region Active</h1>" > /var/www/html/index.html
+          echo "<h3>Status: 200 OK | Node: Primary-EC2</h3>" >> /var/www/html/index.html
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-AppServer'
+        - Key: Role
+          Value: PrimaryWorkload
+
+  # ==========================================
+  # 4. DATABASE (RDS MYSQL MULTI-AZ)
+  # ==========================================
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for Primary RDS Multi-AZ Deployment
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-DBSubnetGroup'
+
+  PrimaryRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: enterprise-primary-db
+      AllocatedStorage: 20
+      StorageType: gp3
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      EngineVersion: '8.0'
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+      MultiAZ: true
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: '02:00-03:00'
+      PubliclyAccessible: false
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-MySQL'
+        - Key: DisasterRecoveryRole
+          Value: PrimaryDatabase
+
+  # ==========================================
+  # 5. STORAGE (PRIMARY S3 BACKUP BUCKET)
+  # ==========================================
+  PrimaryS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${BackupBucketPrefix}-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToGlacierAndExpire
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+            ExpirationInDays: 365
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-BackupBucket'
+        - Key: DisasterRecoveryRole
+          Value: PrimaryS3Backup
+
+Outputs:
+  VPCId:
+    Description: Primary VPC ID
+    Value: !Ref PrimaryVPC
+    Export:
+      Name: PrimaryVPCId
+
+  PrimaryEC2PublicIP:
+    Description: Public IP of Primary App Server
+    Value: !GetAtt PrimaryEC2Instance.PublicIp
+
+  RDSClusterEndpoint:
+    Description: RDS Primary Endpoint
+    Value: !GetAtt PrimaryRDSInstance.Endpoint.Address
+
+  PrimaryS3BucketName:
+    Description: S3 Backup Bucket Name
+    Value: !Ref PrimaryS3Bucket

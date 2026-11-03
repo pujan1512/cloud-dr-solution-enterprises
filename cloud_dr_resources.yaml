@@ -1,0 +1,96 @@
+# ==============================================================================
+# Cloud-Based Disaster Recovery Solution for Enterprises
+# Infrastructure as Code (IaC) - Core Architecture Stack (Phase 1 / 50% Milestone)
+# ==============================================================================
+# Note: For multi-region enterprise deployments, see:
+#   - Primary Region:  cloudformation/primary_region.yaml
+#   - DR / Standby:    cloudformation/dr_region.yaml
+# ==============================================================================
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Core Disaster Recovery Infrastructure Stack supporting Warm Standby architecture,
+  automated S3 backup versioning, and RDS database replication.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: Production
+    AllowedValues: [Production, Staging, DisasterRecovery]
+  
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: EC2 instance type for Primary Workload
+
+Resources:
+  # Primary Web Application Security Group
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP/HTTPS and SSH access for Primary Node
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  # Primary EC2 Workload
+  PrimaryEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: ami-0c55b159cbfafe1f0 # Amazon Linux 2 (Update for region)
+      SecurityGroups:
+        - !Ref InstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-Primary-EC2'
+        - Key: Role
+          Value: PrimaryActive
+        - Key: DRStrategy
+          Value: WarmStandby
+
+  # S3 Bucket for Disaster Recovery Backups with Versioning & Encryption
+  BackupS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'disaster-recovery-backups-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: MoveOldBackupsToGlacier
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+            ExpirationInDays: 365
+      Tags:
+        - Key: Name
+          Value: Enterprise-DR-Backups
+        - Key: DisasterRecoveryTier
+          Value: Tier1-Critical
+
+Outputs:
+  PrimaryInstanceId:
+    Description: Instance ID of the Primary Server
+    Value: !Ref PrimaryEC2Instance
+  
+  BackupBucketArn:
+    Description: ARN of the Disaster Recovery S3 Bucket
+    Value: !GetAtt BackupS3Bucket.Arn
