@@ -1,0 +1,67 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Public authoritative DNS and health-based failover records for the DR demonstration.
+Parameters:
+  DomainName:
+    Type: String
+    Description: Domain or subdomain that can be delegated to the resulting Route 53 nameservers
+    AllowedPattern: '^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\.?$'
+  PrimaryIP:
+    Type: String
+  RecoveryIP:
+    Type: String
+Resources:
+  Zone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+  PrimaryCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTP
+        IPAddress: !Ref PrimaryIP
+        Port: 80
+        ResourcePath: /health
+        RequestInterval: 30
+        FailureThreshold: 3
+  RecoveryCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTP
+        IPAddress: !Ref RecoveryIP
+        Port: 80
+        ResourcePath: /health
+        RequestInterval: 30
+        FailureThreshold: 3
+  PrimaryRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref Zone
+      Name: !Ref DomainName
+      Type: A
+      TTL: 60
+      SetIdentifier: Primary
+      Failover: PRIMARY
+      HealthCheckId: !Ref PrimaryCheck
+      ResourceRecords: [!Ref PrimaryIP]
+  RecoveryRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref Zone
+      Name: !Ref DomainName
+      Type: A
+      TTL: 60
+      SetIdentifier: Recovery
+      Failover: SECONDARY
+      HealthCheckId: !Ref RecoveryCheck
+      ResourceRecords: [!Ref RecoveryIP]
+Outputs:
+  HostedZoneId:
+    Value: !Ref Zone
+  NameServers:
+    Value: !Join [', ', !GetAtt Zone.NameServers]
+  PrimaryHealthCheckId:
+    Value: !Ref PrimaryCheck
+  RecoveryHealthCheckId:
+    Value: !Ref RecoveryCheck
