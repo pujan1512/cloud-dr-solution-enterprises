@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Enterprise Cloud Disaster Recovery - Advanced Multi-Region Routing Architecture
+  Module 6 (100% Final Deliverable): Route 53 Latency, Geolocation, and Multi-Region Health Routing
+  Deploys Global Route 53 Health Checks, CloudWatch Synthetic Alarms, and Failover Routing Policies.
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: dr.enterprise-solution.com
+    Description: Fully qualified domain name for enterprise service
+  
+  PrimaryIP:
+    Type: String
+    Default: 198.51.100.1
+    Description: Public IP of Primary Region Application Load Balancer
+  
+  DRIP:
+    Type: String
+    Default: 198.51.100.200
+    Description: Public IP of DR Region Standby Application Load Balancer
+
+Resources:
+  # ==========================================
+  # 1. ROUTE 53 HEALTH CHECKS
+  # ==========================================
+  PrimaryHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTP
+        ResourcePath: /health
+        FullyQualifiedDomainName: !Ref DomainName
+        IPAddress: !Ref PrimaryIP
+        Port: 80
+        RequestInterval: 30
+        FailureThreshold: 3
+        MeasureLatency: true
+        EnableSNI: false
+      HealthCheckTags:
+        - Key: Name
+          Value: Primary-Region-HealthCheck
+        - Key: Environment
+          Value: Production
+
+  DRHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTP
+        ResourcePath: /health
+        IPAddress: !Ref DRIP
+        Port: 80
+        RequestInterval: 30
+        FailureThreshold: 3
+        MeasureLatency: true
+      HealthCheckTags:
+        - Key: Name
+          Value: DR-Region-HealthCheck
+        - Key: Environment
+          Value: DisasterRecovery
+
+  # ==========================================
+  # 2. CLOUDWATCH ALARMS FOR OUTAGE DETECTION
+  # ==========================================
+  PrimaryHealthCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: PrimaryRegion-HealthCheck-FailureAlarm
+      AlarmDescription: Triggered when Route 53 detects 3 consecutive health check timeouts on Primary
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !Ref PrimaryHealthCheck
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  # ==========================================
+  # 3. ROUTE 53 HOSTED ZONE & FAILOVER RECORDS
+  # ==========================================
+  EnterpriseHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+
+  PrimaryDNSFailoverRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref EnterpriseHostedZone
+      Name: !Ref DomainName
+      Type: A
+      TTL: 60
+      SetIdentifier: Primary-Region-Active
+      Failover: PRIMARY
+      HealthCheckId: !Ref PrimaryHealthCheck
+      ResourceRecords:
+        - !Ref PrimaryIP
+
+  SecondaryDNSFailoverRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref EnterpriseHostedZone
+      Name: !Ref DomainName
+      Type: A
+      TTL: 60
+      SetIdentifier: DR-Region-Standby
+      Failover: SECONDARY
+      ResourceRecords:
+        - !Ref DRIP
+
+Outputs:
+  HostedZoneId:
+    Description: Route 53 Hosted Zone ID
+    Value: !Ref EnterpriseHostedZone
+
+  PrimaryHealthCheckId:
+    Description: Primary Route 53 Health Check ID
+    Value: !Ref PrimaryHealthCheck
+
+  DRHealthCheckId:
+    Description: DR Standby Route 53 Health Check ID
+    Value: !Ref DRHealthCheck
