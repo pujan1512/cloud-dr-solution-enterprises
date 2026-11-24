@@ -196,7 +196,7 @@ class FinalMilestoneVerifier:
         print("-" * 75)
         if passed_tests == total_tests:
             print("FINAL VERDICT: [PASS] 100% PRODUCTION IMPLEMENTATION FULLY VERIFIED!")
-            print("System is ready for university capstone defense and teacher presentation.")
+            print("System is ready for university Project Defense and teacher presentation.")
         else:
             print("FINAL VERDICT: [WARNING] One or more verification checks failed.")
         print("=" * 75)

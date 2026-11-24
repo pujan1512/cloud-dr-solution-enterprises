@@ -41,7 +41,7 @@ def print_banner():
             "  * Primary Region: us-east-1 (N. Virginia) | DR Region: us-west-2 (Oregon)\n"
             "======================================================================"
         )
-        console.print(Panel(banner_text, style="cyan", title="[bold white]FINAL CAPSTONE SUBMISSION DEMONSTRATOR[/bold white]"))
+        console.print(Panel(banner_text, style="cyan", title="[bold white]FINAL Project Submission DEMONSTRATOR[/bold white]"))
     else:
         print("=" * 70)
         print(" ENTERPRISE CLOUD DISASTER RECOVERY - 100% FINAL LIFECYCLE")
